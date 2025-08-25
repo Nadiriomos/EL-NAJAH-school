@@ -1458,18 +1458,17 @@ def update_student(student_id, name, pay_status, selected_groups):
 def refresh_treeview_all(year=None, month=None):
     for i in tree.get_children():
         tree.delete(i)
+    setup_tree_columns(tree)
 
     if year is None or month is None:
         from datetime import datetime
         now = datetime.now()
         year, month = now.year, now.month
 
-    # Build a YYYY-MM-DD for the selected period (use day=1 always)
     selected_date = f"{year}-{month:02d}-01"
 
     conn = sqlite3.connect("elnajah.db")
     c = conn.cursor()
-
     c.execute("""
         SELECT s.id,
                s.name,
@@ -1492,6 +1491,7 @@ def refresh_treeview_all(year=None, month=None):
         tree.insert("", "end", values=row)
 
     conn.close()
+
 
 
 
@@ -1752,6 +1752,21 @@ style.theme_use("default")
 style.configure("Treeview", rowheight=30, font=("Arial", 12))
 style.configure("Treeview.Heading", font=("Arial", 12, "bold"))
 
+def setup_tree_columns(tree):
+    tree["columns"] = ("id", "name", "group", "monthly_payment")
+    tree["show"] = "headings"
+
+    tree.heading("id", text="ID")
+    tree.heading("name", text="Name")
+    tree.heading("group", text="Group")
+    tree.heading("monthly_payment", text="Monthly Payment")
+
+    tree.column("id", width=60, anchor="center")
+    tree.column("name", width=180, anchor="w")
+    tree.column("group", width=120, anchor="w")
+    tree.column("monthly_payment", width=120, anchor="center")
+
+
 # === Header Click Event ===
 # Helper: run query and update tree
 def _update_tree_from_query(sql, params=()):
@@ -1787,23 +1802,28 @@ def _update_tree_from_query(sql, params=()):
 # 1) ID: show all students, sorted by id
 
 def show_sorted_by_id():
-    now = datetime.now()
-    current_year = now.year
-    current_month = now.month  # 1-12
+    for i in tree.get_children():
+        tree.delete(i)
+    setup_tree_columns(tree)
 
-    sql = """
-        SELECT s.id, s.name,
+    conn = sqlite3.connect("elnajah.db")
+    c = conn.cursor()
+    c.execute("""
+        SELECT s.id,
+               s.name,
                COALESCE(GROUP_CONCAT(g.name), '—') AS groups,
-               COALESCE(p.paid, 'No record') AS monthly_payment
+               CASE WHEN p.paid='paid' THEN 'Paid' ELSE 'Unpaid' END
         FROM students s
         LEFT JOIN student_group sg ON s.id = sg.student_id
-        LEFT JOIN groups g ON sg.group_id = g.id
-        LEFT JOIN payments p
-               ON s.id = p.student_id AND p.year = ? AND p.month = ?
+        LEFT JOIN groups g ON g.id = sg.group_id
+        LEFT JOIN payments p ON s.id = p.student_id
         GROUP BY s.id
         ORDER BY s.id ASC
-    """
-    _update_tree_from_query(sql, (current_year, current_month))
+    """)
+    for row in c.fetchall():
+        tree.insert("", "end", values=row)
+    conn.close()
+
 
 
 
@@ -1823,23 +1843,28 @@ def set_tree_default_view():
 set_tree_default_view()
 
 def show_sorted_by_name():
-    now = datetime.now()
-    current_year = now.year
-    current_month = now.month  # 1-12
+    for i in tree.get_children():
+        tree.delete(i)
+    setup_tree_columns(tree)
 
-    sql = """
-        SELECT s.id, s.name,
+    conn = sqlite3.connect("elnajah.db")
+    c = conn.cursor()
+    c.execute("""
+        SELECT s.id,
+               s.name,
                COALESCE(GROUP_CONCAT(g.name), '—') AS groups,
-               COALESCE(p.paid, 'No record') AS monthly_payment
+               CASE WHEN p.paid='paid' THEN 'Paid' ELSE 'Unpaid' END
         FROM students s
         LEFT JOIN student_group sg ON s.id = sg.student_id
-        LEFT JOIN groups g ON sg.group_id = g.id
-        LEFT JOIN payments p
-               ON s.id = p.student_id AND p.year = ? AND p.month = ?
+        LEFT JOIN groups g ON g.id = sg.group_id
+        LEFT JOIN payments p ON s.id = p.student_id
         GROUP BY s.id
         ORDER BY s.name COLLATE NOCASE ASC
-    """
-    _update_tree_from_query(sql, (current_year, current_month))
+    """)
+    for row in c.fetchall():
+        tree.insert("", "end", values=row)
+    conn.close()
+
 
 
 # 3) Pay: show students who did NOT pay
@@ -1889,6 +1914,10 @@ def show_unpaid_for_month(year, month_name):
 
     # Build a YYYY-MM-DD for the selected period (always day=1)
     selected_date = f"{int(year)}-{month_number:02d}-01"
+    for i in tree.get_children():
+        tree.delete(i)
+    setup_tree_columns(tree)
+
 
     sql = """
         SELECT s.id, s.name,
@@ -1926,6 +1955,10 @@ def show_by_group(group_name):
     now = datetime.now()
     current_year = now.year
     current_month = now.month  # 1-12
+    for i in tree.get_children():
+        tree.delete(i)
+    setup_tree_columns(tree)
+
 
     sql = """
         SELECT s.id, s.name,
