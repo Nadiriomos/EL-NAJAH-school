@@ -935,8 +935,8 @@ help_menu.add_command(label="Send Feedback", command=send_feedback)
 menubar.add_cascade(label="Help", menu=help_menu)
 
 # === Welcome Label ===
-logo_img = ctk.CTkImage(light_image=Image.open(r"e:/sankouh/El Najah School logo.png"),
-                        dark_image=Image.open(r"e:/sankouh/El Najah School logo.png"),
+logo_img = ctk.CTkImage(light_image=Image.open("El Najah School logo.png"),
+                        dark_image=Image.open("El Najah School logo.png"),
                         size=(615/1.8 , 172/1.8))
 
 # Display image in a label
