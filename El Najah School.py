@@ -935,9 +935,9 @@ help_menu.add_command(label="Send Feedback", command=send_feedback)
 menubar.add_cascade(label="Help", menu=help_menu)
 
 # === Welcome Label ===
-logo_img = ctk.CTkImage(light_image=Image.open("El Najah School logo.png"),
-                        dark_image=Image.open("El Najah School logo.png"),
-                        size=(679/1.8 , 247/1.8))
+logo_img = ctk.CTkImage(light_image=Image.open(r"e:/sankouh/El Najah School logo.png"),
+                        dark_image=Image.open(r"e:/sankouh/El Najah School logo.png"),
+                        size=(615/1.8 , 172/1.8))
 
 # Display image in a label
 label = ctk.CTkLabel(ElNajahSchool, image=logo_img, text="")  # text="" to hide label text
@@ -1809,15 +1809,16 @@ def show_sorted_by_id():
     conn = sqlite3.connect("elnajah.db")
     c = conn.cursor()
     c.execute("""
-        SELECT s.id,
-               s.name,
-               COALESCE(GROUP_CONCAT(g.name), '—') AS groups,
-               CASE WHEN p.paid='paid' THEN 'Paid' ELSE 'Unpaid' END
+        SELECT 
+            s.id,
+            s.name,
+            COALESCE(GROUP_CONCAT(DISTINCT g.name), '—') AS groups,
+            MAX(CASE WHEN p.paid = 'paid' THEN 'Paid' ELSE 'Unpaid' END) AS payment_status
         FROM students s
         LEFT JOIN student_group sg ON s.id = sg.student_id
-        LEFT JOIN groups g ON g.id = sg.group_id
+        LEFT JOIN groups g ON sg.group_id = g.id
         LEFT JOIN payments p ON s.id = p.student_id
-        GROUP BY s.id
+        GROUP BY s.id, s.name
         ORDER BY s.id ASC
     """)
     for row in c.fetchall():
@@ -1850,15 +1851,16 @@ def show_sorted_by_name():
     conn = sqlite3.connect("elnajah.db")
     c = conn.cursor()
     c.execute("""
-        SELECT s.id,
-               s.name,
-               COALESCE(GROUP_CONCAT(g.name), '—') AS groups,
-               CASE WHEN p.paid='paid' THEN 'Paid' ELSE 'Unpaid' END
+        SELECT 
+            s.id,
+            s.name,
+            COALESCE(GROUP_CONCAT(DISTINCT g.name), '—') AS groups,
+            MAX(CASE WHEN p.paid = 'paid' THEN 'Paid' ELSE 'Unpaid' END) AS payment_status
         FROM students s
         LEFT JOIN student_group sg ON s.id = sg.student_id
-        LEFT JOIN groups g ON g.id = sg.group_id
+        LEFT JOIN groups g ON sg.group_id = g.id
         LEFT JOIN payments p ON s.id = p.student_id
-        GROUP BY s.id
+        GROUP BY s.id, s.name
         ORDER BY s.name COLLATE NOCASE ASC
     """)
     for row in c.fetchall():
