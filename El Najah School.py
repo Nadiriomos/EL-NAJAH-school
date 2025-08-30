@@ -2761,14 +2761,6 @@ def open_edit_student_payment_modal(student_id: int = None):
     year_menu = ctk.CTkOptionMenu(yr_frame, variable=ay_var, values=options)
     year_menu.pack(side="left")
 
-    # --- "Remaining Amount" (manual note)
-    remaining_frame = ctk.CTkFrame(win)
-    remaining_frame.pack(fill="x", padx=12, pady=(0, 6))
-    ctk.CTkLabel(remaining_frame, text="Remaining Amount (note)", font=("", 12, "bold")).pack(side="left", padx=(8, 8))
-    remaining_var = ctk.StringVar(value="")
-    remaining_entry = ctk.CTkEntry(remaining_frame, textvariable=remaining_var, placeholder_text="manual note only")
-    remaining_entry.pack(side="left", fill="x", expand=True)
-
     # --- Months Grid (2 rows x 6 cols)
     grid_frame = ctk.CTkFrame(win)
     grid_frame.pack(fill="both", expand=True, padx=12, pady=12)
