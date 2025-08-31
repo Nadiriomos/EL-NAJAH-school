@@ -16,6 +16,13 @@ import webbrowser
 import urllib.parse
 from PIL import Image, ImageTk
 from tkinter import simpledialog, messagebox
+import sys, os
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
 
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
@@ -935,9 +942,12 @@ help_menu.add_command(label="Send Feedback", command=send_feedback)
 menubar.add_cascade(label="Help", menu=help_menu)
 
 # === Welcome Label ===
-logo_img = ctk.CTkImage(light_image=Image.open("El Najah School logo.png"),
-                        dark_image=Image.open("El Najah School logo.png"),
-                        size=(615/1.8 , 172/1.8))
+logo_path = resource_path("El Najah School logo.png")
+logo_img = ctk.CTkImage(
+    light_image=Image.open(logo_path),
+    dark_image=Image.open(logo_path),
+    size=(615/1.8, 172/1.8)
+)
 
 # Display image in a label
 label = ctk.CTkLabel(ElNajahSchool, image=logo_img, text="")  # text="" to hide label text
@@ -3058,7 +3068,6 @@ def open_edit_payment_modal(student_id: int, on_saved=None):
     - AY selector (defaults to current AY)
     - 12 month grid (Aug..Jul): Paid/Unpaid radios + date entry
     - Months before join date are disabled ("No record (before join)")
-    - Remaining Amount: manual note (not persisted)
     - Save writes all editable months; Cancel discards.
     - on_saved(sid) optional callback after successful save.
     """
@@ -3097,14 +3106,6 @@ def open_edit_payment_modal(student_id: int, on_saved=None):
     ay_var = ctk.StringVar(value=default_ay)
     year_menu = ctk.CTkOptionMenu(yr_frame, variable=ay_var, values=ay_options)
     year_menu.pack(side="left")
-
-    # --- Remaining Amount (manual note only)
-    remaining_frame = ctk.CTkFrame(win)
-    remaining_frame.pack(fill="x", padx=12, pady=(0, 6))
-    ctk.CTkLabel(remaining_frame, text="Remaining Amount (note)", font=("", 12, "bold")).pack(side="left", padx=(8, 8))
-    remaining_var = ctk.StringVar(value="")
-    ctk.CTkEntry(remaining_frame, textvariable=remaining_var, placeholder_text="manual note only").pack(side="left", fill="x", expand=True)
-
     # --- Months Grid
     grid_frame = ctk.CTkFrame(win)
     grid_frame.pack(fill="both", expand=True, padx=12, pady=12)
