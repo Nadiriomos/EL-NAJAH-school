@@ -3,7 +3,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import sqlite3
 import shutil
-# Duplicate import commented out (already imported above)
 import os
 import time
 from datetime import datetime
