@@ -83,11 +83,9 @@ except Exception:
     pass
 
 # Geometry
-try:
-    # full screen where supported
-    ElNajahSchool.state("zoomed")
-except Exception:
-    ElNajahSchool.geometry("1024x768")
+screen_width = ElNajahSchool.winfo_screenwidth()
+screen_height = ElNajahSchool.winfo_screenheight()
+ElNajahSchool.geometry(f"{screen_width}x{screen_height}+0+0")
 
 ElNajahSchool.configure(fg_color=BACKGROUND)
 

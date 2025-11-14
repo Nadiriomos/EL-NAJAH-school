@@ -180,7 +180,7 @@ def load_history_rows(academic_start_year: int, group_name: str | None) -> list[
             p = pay_map.get((py, pm))
             if p:
                 if p.paid == "paid":
-                    cell_text = f"Paid ({p.payment_date})"
+                    cell_text = f"Paid"
                 else:
                     cell_text = "Unpaid"
             else:
