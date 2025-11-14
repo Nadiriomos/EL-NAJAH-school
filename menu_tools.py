@@ -1,820 +1,906 @@
 import customtkinter as ctk
 import tkinter as tk
-import sqlite3
 import shutil
 import os
 import time
-from datetime import datetime
 import webbrowser
 import urllib.parse
 from datetime import datetime
-from reportlab.lib.pagesizes import A4
+
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.pdfgen import canvas
 from openpyxl import Workbook
-from tkinter import filedialog
-from tkinter import simpledialog, messagebox
+from tkinter import filedialog, simpledialog, messagebox
+
+from DB import (
+    DBError,
+    NotFoundError,
+    get_all_students,
+    get_all_groups as db_get_all_groups,
+    get_student,
+    get_student_groups,
+    set_student_groups,
+    get_group_students,
+    get_groupless_students,
+    delete_students_by_ids,
+    get_unpaid_students_for_month,
+    get_student_counts_by_group,
+    get_payments_for_student_academic_year,
+    upsert_payments_bulk,
+)
+
+# These will be injected from the main file:
+#   menu_tools.ElNajahSchool = ElNajahSchool
+#   menu_tools.refresh_treeview_all = refresh_treeview_all
+#   menu_tools.get_all_groups = get_all_groups  (optional)
+ElNajahSchool = None
+refresh_treeview_all = None
+get_all_groups = db_get_all_groups  # fallback to DB version
 
 
-def backup_database():
-    # Create a timestamp for unique backup names
-    timestamp = datetime.now.strftime("%Y-%m-%d_%H-%M-%S")
-    backup_name = f"elnajah_backup_{timestamp}.db"
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
 
-    # Backup directory
-    backup_dir = "backups"
-    os.makedirs(backup_dir, exist_ok=True)
-
-    # Copy the DB file
-    shutil.copyfile("elnajah.db", os.path.join(backup_dir, backup_name))
-
-    # Optional: Show a message box to confirm backup completion
-    messagebox.showinfo("Backup Complete", f"Database backup created: {backup_name}")
+def _root():
+    """Return the main window or None."""
+    return ElNajahSchool
 
 
-def export_group_to_pdf(group_name):
-    conn = sqlite3.connect("elnajah.db")
-    c = conn.cursor()
-
-    now = datetime.now()
-    year = now.year
-    month = now.month
-    timestamp = now.strftime("%Y_%m_%d")
-
-    # Query students + pay status for current month
-    c.execute("""
-        SELECT s.id, s.name,
-               COALESCE(p.paid, 'Unpaid') AS pay_status
-        FROM students s
-        JOIN student_group sg ON s.id = sg.student_id
-        JOIN groups g ON sg.group_id = g.id
-        LEFT JOIN payments p 
-            ON s.id = p.student_id AND p.year = ? AND p.month = ?
-        WHERE g.name = ?
-        ORDER BY s.name
-    """, (year, month, group_name))
-
-    rows = c.fetchall()
-    conn.close()
-
-    if not rows:
-        messagebox.showinfo("No Data", f"No students found in group '{group_name}' for {timestamp}.")
-        return
-
-    # Create export folder
-    os.makedirs("exports", exist_ok=True)
-    filename = os.path.join("exports", f"group_{group_name.replace(' ', '_')}_{timestamp}.pdf")
-
-    # Create PDF
-    pdf = canvas.Canvas(filename, pagesize=A4)
-    width, height = A4
-
-    # Title
-    pdf.setFont("Helvetica-Bold", 28)
-    pdf.drawString(50, height - 50, f"El Najah School")
-
-    pdf.setFont("Helvetica-Bold", 16)
-    pdf.drawString(50, height - 80, f"Group: {group_name} ({timestamp})")
-
-    # Table header
-    pdf.setFont("Helvetica-Bold", 12)
-    pdf.drawString(50, height - 120, "ID")
-    pdf.drawString(150, height - 120, "Name")
-    pdf.drawString(400, height - 120, "Pay Status")
-
-    # Table rows
-    y = height - 160
-    pdf.setFont("Helvetica", 12)
-    for sid, name, pay_status in rows:
-        pdf.drawString(50, y, str(sid))
-        pdf.drawString(150, y, name)
-        pdf.drawString(400, y, pay_status)
-        y -= 20
-        if y < 50:  # new page
-            pdf.showPage()
-            y = height - 50
-
-    pdf.save()
-    messagebox.showinfo("Export Complete", f"PDF saved: {filename}")
-
-def export_student_payment_history_pdf():
-    """
-    Prompt for Student ID and Academic Year (e.g. 2024 for 2024-2025),
-    then export Aug(year) -> Jul(year+1) payment history for that student to PDF.
-    """
-    # helper: compute default academic year
-    def current_academic_year_from_today():
-        now = datetime.now()
-        return now.year if now.month >= 8 else now.year - 1
-
-    # helper: build ordered months for an academic year
-    def months_for_academic_year(academic_year):
-        months_names = ["January", "February", "March", "April", "May", "June",
-                        "July", "August", "September", "October", "November", "December"]
-        order = []
-        # Aug..Dec => academic_year
-        for m in range(8, 13):
-            order.append((f"{months_names[m-1]} {academic_year}", academic_year, m))
-        # Jan..Jul => academic_year + 1
-        for m in range(1, 8):
-            order.append((f"{months_names[m-1]} {academic_year+1}", academic_year+1, m))
-        return order
-
-    # Ask for student ID
-    sid_text = simpledialog.askstring("Export Student History", "Enter Student ID (number):", parent=ElNajahSchool)
-    if sid_text is None:
-        return  # user cancelled
-    sid_text = sid_text.strip()
-    if not sid_text.isdigit():
-        messagebox.showerror("Invalid ID", "Student ID must be a number.")
-        return
-    student_id = int(sid_text)
-
-    # Verify student exists
-    conn = sqlite3.connect("elnajah.db")
-    c = conn.cursor()
-    c.execute("SELECT name FROM students WHERE id = ?", (student_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close()
-        messagebox.showerror("Not found", f"Student ID {student_id} was not found.")
-        return
-    student_name = row[0]
-
-    # Ask for academic year (start year)
-    default_year = current_academic_year_from_today()
-    year_text = simpledialog.askstring("Academic Year",
-                                       f"Enter academic START year (e.g. {default_year} for {default_year}-{default_year+1}):",
-                                       initialvalue=str(default_year),
-                                       parent=ElNajahSchool)
-    if year_text is None:
-        conn.close()
-        return
-    year_text = year_text.strip()
-    if not year_text.isdigit():
-        conn.close()
-        messagebox.showerror("Invalid Year", "Year must be a number, e.g. 2024.")
-        return
-    academic_year = int(year_text)
-
-    # Build months
-    months = months_for_academic_year(academic_year)
-
-    # Fetch records for each month (latest payment row if any)
-    history_rows = []
-    try:
-        for label, y, mnum in months:
-            c.execute("""
-                SELECT paid, payment_date
-                FROM payments
-                WHERE student_id = ? AND year = ? AND month = ?
-                ORDER BY payment_date DESC
-                LIMIT 1
-            """, (student_id, y, mnum))
-            pr = c.fetchone()
-            if pr is None:
-                status = "unpaid"   # per your spec: treat missing as unpaid for export
-                pdate = "—"
-            else:
-                paid_val, pdate_val = pr
-                if paid_val is None:
-                    status = "unpaid"
-                else:
-                    status = paid_val  # 'paid' or 'unpaid'
-                pdate = pdate_val if pdate_val else "—"
-            history_rows.append((label, status, pdate))
-    finally:
-        conn.close()
-
-    # Confirm / let user pick filename location (optional)
-    os.makedirs("exports", exist_ok=True)
-    default_filename = f"exports/student_{student_id}_{student_name}_{academic_year}-{academic_year+1}_{datetime.now().strftime('%Y_%m_%d')}.pdf"
-    save_path = filedialog.asksaveasfilename(
-        title="Save payment history PDF",
-        initialdir=os.path.abspath("exports"),
-        initialfile=os.path.basename(default_filename),
-        defaultextension=".pdf",
-        filetypes=[("PDF files", "*.pdf")],
-        parent=ElNajahSchool
-    )
-    if not save_path:
-        # user cancelled save dialog
-        return
-
-    # Create simple portrait A4 PDF with header + table (Month | Status | Payment Date)
-    pdf = canvas.Canvas(save_path, pagesize=A4)
-    page_w, page_h = A4
-    left = 40
-    right = 40
-    top = 40
-    y = page_h - top
-
-    # Header
-    pdf.setFont("Helvetica-Bold", 16)
-    pdf.drawString(left, y, "El Najah School")
-    y -= 22
-    pdf.setFont("Helvetica", 12)
-    pdf.drawString(left, y, f"Student Payment History")
-    y -= 16
-    pdf.setFont("Helvetica", 11)
-    pdf.drawString(left, y, f"Student ID: {student_id}    Name: {student_name}")
-    y -= 14
-    pdf.drawString(left, y, f"Academic Year: {academic_year}-{academic_year+1}")
-    y -= 20
-
-    # Table header
-    pdf.setFont("Helvetica-Bold", 11)
-    col1_x = left
-    col2_x = left + 200
-    col3_x = left + 340
-    pdf.drawString(col1_x, y, "Month")
-    pdf.drawString(col2_x, y, "Status")
-    pdf.drawString(col3_x, y, "Payment Date")
-    y -= 14
-    pdf.line(left, y + 9.5, page_w - right, y + 9.5)
-    pdf.setFont("Helvetica", 11)
-
-    # Rows
-    line_height = 14
-    for label, status, pdate in history_rows:
-        if y - line_height < 40:
-            pdf.showPage()
-            y = page_h - top
-            # redraw header on new page
-            pdf.setFont("Helvetica-Bold", 11)
-            pdf.drawString(col1_x, y, "Month")
-            pdf.drawString(col2_x, y, "Status")
-            pdf.drawString(col3_x, y, "Payment Date")
-            y -= 16
-            pdf.line(left, y + 6, page_w - right, y + 6)
-            pdf.setFont("Helvetica", 11)
-
-        pdf.drawString(col1_x, y, label)
-        pdf.drawString(col2_x, y, status)
-        pdf.drawString(col3_x, y, pdate)
-        y -= line_height
-
-    # Footer / generated on
-    if y - 40 < 0:
-        pdf.showPage()
-        y = page_h - top
-    pdf.setFont("Helvetica-Oblique", 9)
-    pdf.drawString(left, 30, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-    pdf.save()
-    messagebox.showinfo("Export Complete", f"PDF saved to:\n{save_path}", parent=ElNajahSchool)
+def _today_str():
+    from datetime import date
+    return date.today().strftime("%Y-%m-%d")
 
 
-def open_group_selector_and_export():
-    groups = get_all_groups()
-    if not groups:
-        messagebox.showinfo("No groups", "There are no groups in the database.")
-        return
+def _ensure_groups_func():
+    global get_all_groups
+    if get_all_groups is None:
+        get_all_groups = db_get_all_groups
 
-    top = ctk.CTkToplevel(ElNajahSchool)
-    top.title("Export Group to PDF")
-    top.geometry("360x140")
-    top.grab_set(); top.focus_force()
 
-    ctk.CTkLabel(top, text="Select a group to export:", font=("Arial", 14)).pack(pady=(12,6))
-
-    selected = ctk.StringVar(value=groups[0])
-    option = ctk.CTkOptionMenu(top, values=groups, variable=selected)
-    option.pack(pady=6, padx=12, fill='x')
-
-    def export_and_close():
-        export_group_to_pdf(selected.get())
-        top.destroy()
-
-    btn_frame = ctk.CTkFrame(top, fg_color="transparent")
-    btn_frame.pack(pady=8, padx=12, fill='x')
-    ctk.CTkButton(btn_frame, text="Export PDF", command=export_and_close).pack(side='left', padx=6)
-    ctk.CTkButton(btn_frame, text="Cancel", command=top.destroy).pack(side='left', padx=6)
+# ---------------------------------------------------------------------------
+# Tools: delete groupless students
+# ---------------------------------------------------------------------------
 
 def delete_groupless_students():
+    """
+    Delete all students that are not in any group.
+
+    Uses DB.get_groupless_students() + DB.delete_students_by_ids().
+    """
+    try:
+        groupless = get_groupless_students()
+    except DBError as e:
+        messagebox.showerror("DB Error", f"Could not find groupless students:\n{e}")
+        return
+
+    if not groupless:
+        messagebox.showinfo("No Groupless Students", "No students without groups were found.")
+        return
+
+    names_list = "\n".join(f"- {s['id']} · {s['name']}" for s in groupless[:10])
+    extra = ""
+    if len(groupless) > 10:
+        extra = f"\n… and {len(groupless) - 10} more."
+
     if not messagebox.askyesno(
         "Confirm Delete",
-        "Are you sure you want to delete ALL students who have no groups?\n"
-        "This cannot be undone (unless you restore from a backup)."
+        f"The following students have NO groups:\n\n{names_list}{extra}\n\n"
+        f"Delete ALL of them? This cannot be undone (except via a full DB restore).",
     ):
         return
 
-    conn = sqlite3.connect("elnajah.db")
-    c = conn.cursor()
+    ids = [s["id"] for s in groupless]
     try:
-        # Find groupless students
-        c.execute("""
-            SELECT id, name
-            FROM students
-            WHERE id NOT IN (SELECT student_id FROM student_group)
-        """)
-        groupless = c.fetchall()
-
-        if not groupless:
-            messagebox.showinfo("No Action", "No groupless students found.")
-            return
-
-        # Delete payments for those students (safety if cascade isn't working)
-        student_ids = [str(sid) for sid, _ in groupless]
-        placeholders = ",".join("?" for _ in student_ids)
-
-        c.execute(f"DELETE FROM payments WHERE student_id IN ({placeholders})", student_ids)
-
-        # Delete students
-        c.execute(f"DELETE FROM students WHERE id IN ({placeholders})", student_ids)
-
-        conn.commit()
-
-        refresh_treeview_all()
-
-        deleted_names = ", ".join([name for _, name in groupless])
-        messagebox.showinfo("Deleted", f"Groupless students deleted:\n{deleted_names}")
-
-    except Exception as e:
-        conn.rollback()
-        messagebox.showerror("Error", str(e))
-    finally:
-        conn.close()
-
-    refresh_treeview_all()
-
-def export_all_students_excel():
-    # Fetch all students with their groups
-    conn = sqlite3.connect("elnajah.db")
-    c = conn.cursor()
-    c.execute("""
-        SELECT s.id, s.name, GROUP_CONCAT(g.name)
-        FROM students s
-        LEFT JOIN student_group sg ON s.id = sg.student_id
-        LEFT JOIN groups g ON sg.group_id = g.id
-        GROUP BY s.id
-        ORDER BY s.id
-    """)
-    rows = c.fetchall()
-    conn.close()
-
-    if not rows:
-        messagebox.showinfo("No Data", "No students found to export.")
+        delete_students_by_ids(ids)
+    except DBError as e:
+        messagebox.showerror("DB Error", f"Error deleting students:\n{e}")
         return
 
-    # Prepare filename
-    now = datetime.now()
-    timestamp = now.strftime("%Y_%m_%d")
-    export_dir = "exports"
-    os.makedirs("exports", exist_ok=True)
-    filename = os.path.join("exports", "all_students_" + timestamp + ".xlsx")
+    messagebox.showinfo("Deleted", f"Deleted {len(ids)} groupless students.")
+    if refresh_treeview_all:
+        refresh_treeview_all()
 
-    # Create workbook
+
+# ---------------------------------------------------------------------------
+# Tools: merge duplicate students (same name)
+# ---------------------------------------------------------------------------
+
+def merge_duplicate_students():
+    """
+    Automatically merge students with the SAME name (case-insensitive).
+
+    Strategy:
+        - For each name, keep the student with the lowest ID as the master.
+        - Merge groups and payments of other students with same name into master.
+        - Delete the duplicates.
+
+    NOTE: This uses a simple rule; it will not ask which one to keep.
+    """
+    try:
+        students = get_all_students(order_by="name")
+    except DBError as e:
+        messagebox.showerror("DB Error", f"Could not load students:\n{e}")
+        return
+
+    # Group students by lowercased name
+    by_name = {}
+    for stu in students:
+        key = stu.name.strip().lower()
+        by_name.setdefault(key, []).append(stu)
+
+    # Collect all duplicate clusters
+    clusters = [lst for lst in by_name.values() if len(lst) > 1]
+    if not clusters:
+        messagebox.showinfo("No Duplicates", "No duplicate names found to merge.")
+        return
+
+    count_students = sum(len(c) for c in clusters)
+    if not messagebox.askyesno(
+        "Merge Duplicates",
+        "This will automatically merge students with the same name.\n\n"
+        "For each name, the student with the lowest ID will be kept, and the others "
+        "will be merged into it (groups + payments) and then deleted.\n\n"
+        f"Number of duplicate clusters: {len(clusters)}\n"
+        f"Total students in those clusters: {count_students}\n\n"
+        "Do you want to continue?"
+    ):
+        return
+
+    from DB import get_payments_for_student, get_payment, upsert_payment  # to avoid huge imports at top
+
+    merged_pairs = []  # list of (master_id, removed_id)
+
+    for cluster in clusters:
+        # Sort by id, keep the one with smallest id as master
+        cluster_sorted = sorted(cluster, key=lambda s: s.id)
+        master = cluster_sorted[0]
+        others = cluster_sorted[1:]
+
+        # Collect master groups / payments
+        try:
+            master_groups = set(get_student_groups(master.id))
+        except DBError:
+            master_groups = set()
+
+        try:
+            master_payments = get_payments_for_student(master.id)
+        except DBError:
+            master_payments = []
+        master_map = {(p.year, p.month): p for p in master_payments}
+
+        # For each duplicate student
+        for dup in others:
+            try:
+                dup_groups = set(get_student_groups(dup.id))
+            except DBError:
+                dup_groups = set()
+
+            try:
+                dup_payments = get_payments_for_student(dup.id)
+            except DBError:
+                dup_payments = []
+
+            # Merge groups
+            combined_groups = master_groups.union(dup_groups)
+            try:
+                set_student_groups(master.id, sorted(combined_groups))
+            except DBError:
+                pass
+            master_groups = combined_groups
+
+            # Merge payments:
+            #   - If master has no record for (year,month), copy dup's record.
+            #   - If both have records:
+            #       * if one is 'paid' and the other is 'unpaid', choose 'paid'.
+            #       * if both 'paid', choose the one with earlier payment_date.
+            merge_items = []
+            for p in dup_payments:
+                mk = (p.year, p.month)
+                mp = master_map.get(mk)
+                if mp is None:
+                    # master has nothing -> copy dup
+                    merge_items.append({
+                        "year": p.year,
+                        "month": p.month,
+                        "paid": p.paid,
+                        "payment_date": p.payment_date,
+                    })
+                else:
+                    # conflict
+                    chosen_paid = mp.paid
+                    chosen_date = mp.payment_date
+
+                    if mp.paid == "paid" and p.paid == "unpaid":
+                        pass  # keep master
+                    elif mp.paid == "unpaid" and p.paid == "paid":
+                        chosen_paid = "paid"
+                        chosen_date = p.payment_date
+                    elif mp.paid == "paid" and p.paid == "paid":
+                        # keep the earlier date
+                        if p.payment_date < mp.payment_date:
+                            chosen_date = p.payment_date
+
+                    merge_items.append({
+                        "year": p.year,
+                        "month": p.month,
+                        "paid": chosen_paid,
+                        "payment_date": chosen_date,
+                    })
+
+            if merge_items:
+                try:
+                    upsert_payments_bulk(master.id, merge_items)
+                except DBError:
+                    pass
+
+            # Delete duplicate student
+            try:
+                delete_students_by_ids([dup.id])
+            except DBError:
+                continue
+
+            merged_pairs.append((master.id, dup.id))
+
+    if not merged_pairs:
+        messagebox.showinfo("No Changes", "No students were merged.")
+    else:
+        msg = (
+            f"Merged {len(merged_pairs)} students into their master records.\n"
+            "Lowest IDs were kept as masters."
+        )
+        messagebox.showinfo("Merge Complete", msg)
+        if refresh_treeview_all:
+            refresh_treeview_all()
+
+
+# ---------------------------------------------------------------------------
+# Tools: bulk remove group if only group
+# ---------------------------------------------------------------------------
+
+def bulk_remove_group_if_only_group():
+    """
+    Remove a chosen group from any student for whom it is their ONLY group.
+
+    Example:
+        - If student is only in 'Group A', and you choose 'Group A', they become groupless.
+        - If student is in 'Group A, Group B', they are not modified.
+    """
+    _ensure_groups_func()
+    root = _root() or ctk.CTk()
+
+    groups = get_all_groups()
+    if not groups:
+        messagebox.showinfo("No Groups", "There are no groups defined.")
+        if root is not ElNajahSchool:
+            root.destroy()
+        return
+
+    dlg = ctk.CTkToplevel(root)
+    dlg.title("Bulk Remove Group (Only Group)")
+    dlg.geometry("360x200")
+    dlg.grab_set()
+    dlg.focus_force()
+
+    ctk.CTkLabel(dlg, text="Choose group to remove\n(only when it is the only group):",
+                 font=("Arial", 14), justify="center").pack(pady=(16, 8))
+
+    group_var = ctk.StringVar(value=groups[0])
+    option = ctk.CTkOptionMenu(dlg, variable=group_var, values=groups, width=200)
+    option.pack(pady=4)
+
+    btn_frame = ctk.CTkFrame(dlg, fg_color="transparent")
+    btn_frame.pack(pady=12)
+
+    def handle_ok():
+        group_name = group_var.get()
+        if not group_name:
+            dlg.destroy()
+            return
+
+        if not messagebox.askyesno(
+            "Confirm",
+            f"Remove group '{group_name}' from any student for whom it is their ONLY group?\n"
+            f"Students who belong to multiple groups will not be changed."
+        ):
+            return
+
+        try:
+            students = get_group_students(group_name)
+        except DBError as e:
+            messagebox.showerror("DB Error", str(e))
+            dlg.destroy()
+            return
+
+        changed = 0
+        for stu in students:
+            try:
+                groups_for_stu = get_student_groups(stu.id)
+            except DBError:
+                continue
+            if len(groups_for_stu) == 1 and groups_for_stu[0] == group_name:
+                try:
+                    set_student_groups(stu.id, [])
+                except DBError:
+                    continue
+                changed += 1
+
+        messagebox.showinfo(
+            "Done",
+            f"Removed group '{group_name}' from {changed} student(s) where it was the only group."
+        )
+        dlg.destroy()
+        if refresh_treeview_all:
+            refresh_treeview_all()
+
+    ctk.CTkButton(btn_frame, text="Apply", command=handle_ok, fg_color="#3B82F6").pack(side="left", padx=4)
+    ctk.CTkButton(btn_frame, text="Cancel", command=dlg.destroy).pack(side="left", padx=4)
+
+
+# ---------------------------------------------------------------------------
+# Backup / Restore / Purge
+# ---------------------------------------------------------------------------
+
+def _db_path():
+    # your DB file name; keep in sync with DB.py
+    return "elnajah.db"
+
+
+def backup_database():
+    """
+    Create a timestamped backup of elnajah.db in a 'backups' folder.
+    """
+    db_file = _db_path()
+    if not os.path.exists(db_file):
+        messagebox.showerror("Error", f"Database file not found:\n{db_file}")
+        return
+
+    os.makedirs("backups", exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    backup_name = f"elnajah_backup_{timestamp}.db"
+    dest = os.path.join("backups", backup_name)
+
+    try:
+        shutil.copy2(db_file, dest)
+    except Exception as e:
+        messagebox.showerror("Backup Error", f"Could not back up database:\n{e}")
+        return
+
+    messagebox.showinfo("Backup Complete", f"Database backed up to:\n{dest}")
+
+
+def restore_backup():
+    """
+    Restore a backup into elnajah.db.
+
+    WARNING: This overwrites the current DB; user will be prompted.
+    """
+    root = _root()
+    initial_dir = os.path.abspath("backups") if os.path.isdir("backups") else os.getcwd()
+
+    filename = filedialog.askopenfilename(
+        parent=root,
+        title="Select Backup File",
+        initialdir=initial_dir,
+        filetypes=[("DB Files", "*.db"), ("All Files", "*.*")],
+    )
+    if not filename:
+        return
+
+    if not messagebox.askyesno(
+        "Confirm Restore",
+        "Restoring this backup will overwrite the current database file.\n\n"
+        f"Backup: {filename}\n\n"
+        "You should close and restart the application after restoring.\n"
+        "Continue?"
+    ):
+        return
+
+    db_file = _db_path()
+    try:
+        shutil.copy2(filename, db_file)
+    except Exception as e:
+        messagebox.showerror("Restore Error", f"Could not restore backup:\n{e}")
+        return
+
+    messagebox.showinfo(
+        "Restore Complete",
+        "Backup restored successfully.\n\n"
+        "Please CLOSE and RESTART the application now."
+    )
+
+
+def purge_old_backups():
+    """
+    Delete old backup files, keeping only the N most recent in 'backups'.
+    """
+    if not os.path.isdir("backups"):
+        messagebox.showinfo("No Backups", "The 'backups' folder does not exist.")
+        return
+
+    keep_str = simpledialog.askstring(
+        "Purge Backups",
+        "Keep how many most recent backups? (default: 5)",
+        parent=_root(),
+    )
+    if keep_str is None:
+        return
+
+    keep_str = keep_str.strip()
+    if not keep_str:
+        keep_n = 5
+    else:
+        try:
+            keep_n = max(1, int(keep_str))
+        except ValueError:
+            messagebox.showerror("Invalid Number", "Please enter a valid integer.")
+            return
+
+    backups = []
+    for fname in os.listdir("backups"):
+        path = os.path.join("backups", fname)
+        if os.path.isfile(path):
+            backups.append((path, os.path.getmtime(path)))
+
+    if len(backups) <= keep_n:
+        messagebox.showinfo("No Purge Needed", "There are not enough backups to purge.")
+        return
+
+    backups.sort(key=lambda x: x[1], reverse=True)
+    to_keep = backups[:keep_n]
+    to_delete = backups[keep_n:]
+
+    for path, _ in to_delete:
+        try:
+            os.remove(path)
+        except Exception:
+            continue
+
+    messagebox.showinfo(
+        "Purge Complete",
+        f"Kept {len(to_keep)} backups.\nDeleted {len(to_delete)} old backup(s)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Export: group to PDF
+# ---------------------------------------------------------------------------
+
+def _ask_group(parent=None) -> str | None:
+    """
+    Small helper to ask for a group name via CTk popup.
+    """
+    _ensure_groups_func()
+    groups = get_all_groups()
+    if not groups:
+        messagebox.showinfo("No Groups", "There are no groups defined.")
+        return None
+
+    win = ctk.CTkToplevel(parent or _root())
+    win.title("Select Group")
+    win.geometry("360x200")
+    win.grab_set()
+    win.focus_force()
+
+    ctk.CTkLabel(win, text="Select Group", font=("Arial", 16, "bold")).pack(pady=(16, 4))
+    group_var = ctk.StringVar(value=groups[0])
+
+    menu = ctk.CTkOptionMenu(win, variable=group_var, values=groups, width=220)
+    menu.pack(pady=6)
+
+    chosen = {"value": None}
+
+    def on_ok():
+        chosen["value"] = group_var.get()
+        win.destroy()
+
+    def on_cancel():
+        chosen["value"] = None
+        win.destroy()
+
+    btn_frame = ctk.CTkFrame(win, fg_color="transparent")
+    btn_frame.pack(pady=12)
+    ctk.CTkButton(btn_frame, text="OK", command=on_ok, fg_color="#3B82F6").pack(side="left", padx=4)
+    ctk.CTkButton(btn_frame, text="Cancel", command=on_cancel).pack(side="left", padx=4)
+
+    win.wait_window()
+    return chosen["value"]
+
+
+def open_group_selector_and_export():
+    """
+    Ask user for a group, then export its student list to PDF.
+    """
+    group_name = _ask_group()
+    if not group_name:
+        return
+    _export_group_to_pdf(group_name)
+
+
+def _export_group_to_pdf(group_name: str):
+    """
+    Export the given group's students to a simple portrait A4 PDF.
+    """
+    try:
+        students = get_group_students(group_name)
+    except DBError as e:
+        messagebox.showerror("DB Error", f"Could not load students for group '{group_name}':\n{e}")
+        return
+
+    if not students:
+        messagebox.showinfo("No Students", f"No students found in group '{group_name}'.")
+        return
+
+    os.makedirs("exports", exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join("exports", f"group_{group_name.replace(' ', '_')}_{timestamp}.pdf")
+
+    pdf = canvas.Canvas(filename, pagesize=A4)
+    width, height = A4
+    left = 40
+    y = height - 40
+
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(left, y, "El Najah School")
+    y -= 20
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(left, y, f"Group: {group_name}")
+    y -= 25
+
+    pdf.setFont("Helvetica-Bold", 10)
+    pdf.drawString(left, y, "ID")
+    pdf.drawString(left + 60, y, "Name")
+    pdf.drawString(left + 260, y, "Join Date")
+    y -= 16
+
+    pdf.setFont("Helvetica", 9)
+    for stu in students:
+        if y < 50:
+            pdf.showPage()
+            y = height - 40
+            pdf.setFont("Helvetica", 9)
+
+        pdf.drawString(left, y, str(stu.id))
+        pdf.drawString(left + 60, y, stu.name[:30])
+        pdf.drawString(left + 260, y, stu.join_date)
+        y -= 14
+
+    pdf.save()
+    messagebox.showinfo("Export Complete", f"Group list saved to:\n{filename}")
+
+
+# ---------------------------------------------------------------------------
+# Export: all students to Excel
+# ---------------------------------------------------------------------------
+
+def export_all_students_excel():
+    """
+    Export all students (ID, Name, Join Date, Groups) to an Excel file.
+    """
+    try:
+        students = get_all_students(order_by="name")
+    except DBError as e:
+        messagebox.showerror("DB Error", f"Could not load students:\n{e}")
+        return
+
+    if not students:
+        messagebox.showinfo("No Data", "No students to export.")
+        return
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Students"
 
-    # Header row
-    ws.append(["ID", "Name", "Groups"])
+    ws.append(["ID", "Name", "Join Date", "Groups"])
 
-    # Data rows
-    for row in rows:
-        ws.append(row)
+    for stu in students:
+        try:
+            groups_list = get_student_groups(stu.id)
+        except DBError:
+            groups_list = []
+        groups_str = ", ".join(groups_list)
+        ws.append([stu.id, stu.name, stu.join_date, groups_str])
 
-    # Save file
-    wb.save(filename)
-    messagebox.showinfo("Export Complete", f"Excel file saved:\n{filename}")
+    os.makedirs("exports", exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join("exports", f"students_{timestamp}.xlsx")
 
-def restore_backup():
-    # Ask the user to choose a backup file
-    backup_path = filedialog.askopenfilename(
-        title="Select Backup File",
-        initialdir="backups",
-        filetypes=[("SQLite Database", "*.db"), ("All Files", "*.*")]
+    try:
+        wb.save(filename)
+    except Exception as e:
+        messagebox.showerror("Export Error", f"Could not save Excel file:\n{e}")
+        return
+
+    messagebox.showinfo("Export Complete", f"Excel file saved to:\n{filename}")
+
+
+# ---------------------------------------------------------------------------
+# Export: unpaid students to PDF
+# ---------------------------------------------------------------------------
+
+def export_unpaid_students_pdf():
+    """
+    Ask for Year and Month, then export unpaid students for that period to PDF.
+    """
+    now = datetime.now()
+    year_str = simpledialog.askstring(
+        "Year",
+        f"Enter year (YYYY):",
+        initialvalue=str(now.year),
+        parent=_root(),
     )
+    if year_str is None:
+        return
+    try:
+        year = int(year_str)
+    except ValueError:
+        messagebox.showerror("Invalid Year", "Please enter a valid year (e.g. 2024).")
+        return
 
-    if not backup_path:
-        return  # User canceled
-
-    # Confirm restore
-    if not messagebox.askyesno(
-        "Confirm Restore",
-        f"Restore the database from:\n{backup_path}?\n\n"
-        "This will overwrite the current database and cannot be undone."
-    ):
+    month_str = simpledialog.askstring(
+        "Month",
+        "Enter month number (1–12):",
+        initialvalue=str(now.month),
+        parent=_root(),
+    )
+    if month_str is None:
+        return
+    try:
+        month = int(month_str)
+        if not (1 <= month <= 12):
+            raise ValueError
+    except ValueError:
+        messagebox.showerror("Invalid Month", "Please enter a valid month number (1–12).")
         return
 
     try:
-        # Make a backup of the current DB before overwriting
-        backup_database()
-
-        # Replace current DB with selected backup
-        shutil.copyfile(backup_path, "elnajah.db")
-
-        refresh_treeview_all()
-        messagebox.showinfo("Restore Complete", f"Database restored from:\n{backup_path}")
-
-    except Exception as e:
-        messagebox.showerror("Restore Failed", str(e))
-
-def purge_old_backups(days=30):
-    if not os.path.exists("backups"):
-        messagebox.showinfo("No Backups", "Backup folder does not exist.")
+        rows = get_unpaid_students_for_month(year, month, group_name=None)
+    except DBError as e:
+        messagebox.showerror("DB Error", f"Could not load unpaid students:\n{e}")
         return
-
-    # Confirm purge
-    if not messagebox.askyesno(
-        "Confirm Purge",
-        f"Delete all backups older than {days} days?\nThis cannot be undone."
-    ):
-        return
-
-    now = time.time()
-    deleted_files = []
-
-    for filename in os.listdir("backups"):
-        filepath = os.path.join("backups", filename)
-        if os.path.isfile(filepath):
-            file_age_days = (now - os.path.getmtime(filepath)) / (60 * 60 * 24)
-            if file_age_days > days:
-                try:
-                    os.remove(filepath)
-                    deleted_files.append(filename)
-                except Exception as e:
-                    messagebox.showerror("Error Deleting", f"{filename}: {e}")
-
-    if deleted_files:
-        messagebox.showinfo("Purge Complete", f"Deleted backups:\n" + "\n".join(deleted_files))
-    else:
-        messagebox.showinfo("Purge Complete", "No old backups were deleted.")
-
-def contact_support():
-    # Replace with your email
-    your_email = "ywkouamb@gmail.com"
-    subject = "El Najah School Support"
-    body = "سلام الله عليكم ورحمة الله وبركاته\n\n"
-
-    # Encode for URL
-    
-    subject_encoded = urllib.parse.quote(subject)
-    body_encoded = urllib.parse.quote(body)
-
-    # Email link
-    #email_url = f"mailto:{your_email}?subject={subject_encoded}&body={body_encoded}"
-    #webbrowser.open(email_url)
-
-    # Gmail compose link
-    gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={your_email}&su={subject_encoded}&body={body_encoded}"
-    webbrowser.open(gmail_url)
-
-def send_feedback():
-    # Replace with your email
-    your_email = "ywkouamb@gmail.com"
-    subject = "El Najah School Feedback"
-    body = "سلام الله عليكم ورحمة الله وبركاته\n\n"
-
-    # Encode for URL
-    
-    subject_encoded = urllib.parse.quote(subject)
-    body_encoded = urllib.parse.quote(body)
-
-    # Email link
-    #email_url = f"mailto:{your_email}?subject={subject_encoded}&body={body_encoded}"
-    #webbrowser.open(email_url)
-
-    # Gmail compose link
-    gmail_url = f"https://mail.google.com/mail/?view=cm&fs=1&to={your_email}&su={subject_encoded}&body={body_encoded}"
-    webbrowser.open(gmail_url)
-
-def merge_duplicate_students():
-    conn = sqlite3.connect("elnajah.db")
-    c = conn.cursor()
-
-    # 1. Find duplicate names
-    c.execute("""
-        SELECT name, COUNT(*) as cnt
-        FROM students
-        GROUP BY name
-        HAVING cnt > 1
-    """)
-    duplicates = c.fetchall()
-
-    if not duplicates:
-        messagebox.showinfo("Merge Duplicates", "No duplicate students found.")
-        conn.close()
-        return
-
-    # 2. Build modal window
-    top = ctk.CTkToplevel(ElNajahSchool)
-    top.title("Merge Duplicate Students")
-    top.geometry("500x400")
-    top.grab_set()
-
-    frame = ctk.CTkScrollableFrame(top, width=480, height=300)
-    frame.pack(padx=10, pady=10, fill="both", expand=True)
-
-    selected_keep = {}  # map name → tk.IntVar()
-
-    # 3. For each duplicate name, show options
-    for name, _ in duplicates:
-        c.execute("""
-            SELECT s.id, s.name, 
-                   COALESCE(GROUP_CONCAT(g.name), '—') as groups
-            FROM students s
-            LEFT JOIN student_group sg ON s.id = sg.student_id
-            LEFT JOIN groups g ON sg.group_id = g.id
-            WHERE s.name = ?
-            GROUP BY s.id
-            ORDER BY s.id
-        """, (name,))
-        records = c.fetchall()
-
-        if len(records) < 2:
-            continue
-
-        label = ctk.CTkLabel(frame, text=f"Duplicate: {name}", font=("Arial", 14, "bold"))
-        label.pack(anchor="w", pady=(10, 0))
-
-        var = tk.IntVar(value=records[0][0])  # default keep = first ID
-        selected_keep[name] = var
-
-        for sid, sname, groups in records:
-            rb = ctk.CTkRadioButton(
-                frame,
-                text=f"ID {sid} | {sname} | Groups: {groups}",
-                variable=var,
-                value=sid
-            )
-            rb.pack(anchor="w")
-
-    # 4. Merge action
-    def confirm_merge():
-        try:
-            for name, var in selected_keep.items():
-                keep_id = var.get()
-
-                # find all other IDs
-                c.execute("SELECT id FROM students WHERE name = ? AND id != ?", (name, keep_id))
-                merge_ids = [row[0] for row in c.fetchall()]
-
-                for mid in merge_ids:
-                    # Move payments
-                    c.execute("""
-                        INSERT OR IGNORE INTO payments (student_id, year, month, paid, payment_date)
-                        SELECT ?, year, month, paid, payment_date
-                        FROM payments WHERE student_id = ?
-                    """, (keep_id, mid))
-
-                    # Move groups
-                    c.execute("""
-                        INSERT OR IGNORE INTO student_group (student_id, group_id)
-                        SELECT ?, group_id
-                        FROM student_group WHERE student_id = ?
-                    """, (keep_id, mid))
-
-                    # Delete old student
-                    c.execute("DELETE FROM students WHERE id = ?", (mid,))
-
-            conn.commit()
-            messagebox.showinfo("Merge Complete", "Duplicate students successfully merged.")
-            refresh_treeview_all()
-            top.destroy()
-
-        except Exception as e:
-            conn.rollback()
-            messagebox.showerror("Error", str(e))
-
-        finally:
-            conn.close()  # ✅ only close here
-
-    btn = ctk.CTkButton(top, text="Merge Selected", command=confirm_merge)
-    btn.pack(pady=10)
-
-
-
-def bulk_remove_group_if_only_group():
-    groups = get_all_groups()
-    if not groups:
-        messagebox.showinfo("No Groups", "There are no groups in the database.")
-        return
-
-    # Ask user to choose group
-    top = ctk.CTkToplevel(ElNajahSchool)
-    top.title("Bulk Remove Group")
-    top.geometry("360x160")
-    top.grab_set(); top.focus_force()
-
-    ctk.CTkLabel(top, text="Select a group to remove (only if sole group):", font=("Arial", 14)).pack(pady=(12,6))
-
-    selected_group = ctk.StringVar(value=groups[0])
-    option = ctk.CTkOptionMenu(top, values=groups, variable=selected_group)
-    option.pack(pady=6, padx=12, fill='x')
-
-    def confirm_bulk_remove():
-        group_name = selected_group.get()
-        if not messagebox.askyesno("Confirm", f"Delete group '{group_name}' (remove from sole students, and delete group if empty)?"):
-            return
-
-        conn = sqlite3.connect("elnajah.db")
-        c = conn.cursor()
-
-        try:
-            # Get ID of the chosen group
-            c.execute("SELECT id FROM groups WHERE name = ?", (group_name,))
-            row = c.fetchone()
-            if not row:
-                messagebox.showerror("Error", "Group not found.")
-                conn.close()
-                return
-            group_id = row[0]
-
-            # --- Case 1: Group has no students at all ---
-            c.execute("SELECT COUNT(*) FROM student_group WHERE group_id = ?", (group_id,))
-            if c.fetchone()[0] == 0:
-                c.execute("DELETE FROM groups WHERE id = ?", (group_id,))
-                conn.commit()
-                refresh_treeview_all()
-                # refresh OptionMenu
-                option.configure(values=get_all_groups())
-                if get_all_groups():
-                    selected_group.set(get_all_groups()[0])
-                else:
-                    top.destroy()
-                messagebox.showinfo("Group Deleted", f"Group '{group_name}' was deleted (no students).")
-                return
-
-            # --- Case 2: Group has students ---
-            # Find students who are ONLY in this group
-            c.execute("""
-                SELECT s.id
-                FROM students s
-                JOIN student_group sg ON s.id = sg.student_id
-                WHERE sg.group_id = ?
-                GROUP BY s.id
-                HAVING COUNT(sg.group_id) = 1
-            """, (group_id,))
-            students_to_remove = [r[0] for r in c.fetchall()]
-
-            # Remove group links for those students
-            if students_to_remove:
-                c.executemany(
-                    "DELETE FROM student_group WHERE student_id = ? AND group_id = ?", 
-                    [(sid, group_id) for sid in students_to_remove]
-                )
-                conn.commit()
-
-                # Cleanup groupless students
-                delete_groupless_students()
-
-            # Check if group became empty
-            c.execute("SELECT 1 FROM student_group WHERE group_id = ? LIMIT 1", (group_id,))
-            if not c.fetchone():
-                c.execute("DELETE FROM groups WHERE id = ?", (group_id,))
-                conn.commit()
-
-            refresh_treeview_all()
-
-            # refresh OptionMenu after deletion
-            option.configure(values=get_all_groups())
-            if get_all_groups():
-                selected_group.set(get_all_groups()[0])
-            else:
-                top.destroy()
-
-            messagebox.showinfo(
-                "Bulk Remove Complete", 
-                f"Group '{group_name}' processed.\n"
-                f"- Removed from {len(students_to_remove)} student(s).\n"
-                f"- Groupless students auto deleted.\n"
-                f"- Group deleted if empty."
-            )
-
-        except Exception as e:
-            conn.rollback()
-            messagebox.showerror("Error", str(e))
-        finally:
-            conn.close()
-
-    btn_frame = ctk.CTkFrame(top, fg_color="transparent")
-    btn_frame.pack(pady=8, padx=12, fill='x')
-    ctk.CTkButton(btn_frame, text="Remove", command=confirm_bulk_remove).pack(side='left', padx=6)
-    ctk.CTkButton(btn_frame, text="Cancel", command=top.destroy).pack(side='left', padx=6)
-
-
-
-def export_unpaid_students_pdf():
-    year = now.year
-    month = now.month
-    
-
-    conn = sqlite3.connect("elnajah.db")
-    c = conn.cursor()
-    c.execute("""
-        SELECT g.name AS group_name, s.name AS student_name
-        FROM students s
-        JOIN student_group sg ON s.id = sg.student_id
-        JOIN groups g ON sg.group_id = g.id
-        LEFT JOIN payments p 
-            ON p.student_id = s.id AND p.year = ? AND p.month = ?
-        WHERE p.id IS NULL OR p.paid = 'unpaid'
-        ORDER BY g.name, s.name
-    """, (year, month))
-    rows = c.fetchall()
-    conn.close()
 
     if not rows:
-        messagebox.showinfo("No Unpaid", f"No unpaid students found for {year}-{month:02d}.")
+        messagebox.showinfo("No Data", "No unpaid students found for that period.")
         return
 
-    # Prepare filename
     os.makedirs("exports", exist_ok=True)
-    filename = os.path.join("exports", f"unpaid_students_{year}-{month:02d}.pdf")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join("exports", f"unpaid_{year}_{month:02d}_{timestamp}.pdf")
 
-    # Create PDF
     pdf = canvas.Canvas(filename, pagesize=A4)
     width, height = A4
+    left = 40
+    y = height - 40
 
-    pdf.setFont("Helvetica-Bold", 18)
-    pdf.drawString(50, height - 50, f"Unpaid Students Report - {year}-{month:02d}")
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(left, y, "El Najah School")
+    y -= 20
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(left, y, f"Unpaid Students — {year}-{month:02d}")
+    y -= 25
 
-    y = height - 80
-    current_group = None
+    pdf.setFont("Helvetica-Bold", 10)
+    pdf.drawString(left, y, "ID")
+    pdf.drawString(left + 60, y, "Name")
+    pdf.drawString(left + 260, y, "Groups")
+    y -= 16
 
-    pdf.setFont("Helvetica", 12)
-    for group_name, student_name in rows:
-        if group_name != current_group:
-            current_group = group_name
-            y -= 20
-            pdf.setFont("Helvetica-Bold", 14)
-            pdf.drawString(50, y, f"Group: {group_name}")
-            y -= 15
-            pdf.setFont("Helvetica", 12)
-
-        pdf.drawString(70, y, f"- {student_name}")
-        y -= 15
-
-        if y < 50:  # New page
+    pdf.setFont("Helvetica", 9)
+    for row in rows:
+        if y < 50:
             pdf.showPage()
-            y = height - 50
-            pdf.setFont("Helvetica", 12)
+            y = height - 40
+            pdf.setFont("Helvetica", 9)
+
+        pdf.drawString(left, y, str(row["id"]))
+        pdf.drawString(left + 60, y, row["name"][:28])
+        pdf.drawString(left + 260, y, row["groups"][:40])
+        y -= 14
 
     pdf.save()
-    messagebox.showinfo("Export Complete", f"PDF saved to:\n{filename}")
+    messagebox.showinfo("Export Complete", f"Unpaid students report saved to:\n{filename}")
 
 
+# ---------------------------------------------------------------------------
+# Export: student count by group to PDF
+# ---------------------------------------------------------------------------
 
 def export_student_count_pdf():
-    # Ensure export folder exists
-    export_folder = "exports"
-    os.makedirs(export_folder, exist_ok=True)
+    """
+    Export total number of students per group (plus overall total) to PDF.
+    """
+    try:
+        counts = get_student_counts_by_group()
+    except DBError as e:
+        messagebox.showerror("DB Error", f"Could not load group counts:\n{e}")
+        return
 
-    # Connect to DB
-    conn = sqlite3.connect("elnajah.db")
-    c = conn.cursor()
+    if not counts:
+        messagebox.showinfo("No Data", "No group data to export.")
+        return
 
-    # Get total students
-    c.execute("SELECT COUNT(*) FROM students")
-    total_students = c.fetchone()[0]
+    os.makedirs("exports", exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join("exports", f"student_counts_{timestamp}.pdf")
 
-    # Get group counts
-    c.execute("""
-        SELECT g.name, COUNT(sg.student_id) as count
-        FROM groups g
-        LEFT JOIN student_group sg ON g.id = sg.group_id
-        GROUP BY g.id
-        ORDER BY g.name
-    """)
-    group_counts = c.fetchall()
-    conn.close()
-
-    # Prepare PDF file path
-    timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    pdf_path = os.path.join(export_folder, f"student_count_{timestamp}.pdf")
-
-    # Create PDF
-    c_pdf = canvas.Canvas(pdf_path, pagesize=A4)
+    pdf = canvas.Canvas(filename, pagesize=A4)
     width, height = A4
+    left = 40
+    y = height - 40
 
-    # Title
-    c_pdf.setFont("Helvetica-Bold", 18)
-    c_pdf.drawString(50, height - 50, "ElNajahSchool - Student Count Report")
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(left, y, "El Najah School")
+    y -= 20
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(left, y, "Student Count by Group")
+    y -= 25
 
-    # Date
-    c_pdf.setFont("Helvetica", 10)
-    c_pdf.drawString(50, height - 70, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    pdf.setFont("Helvetica-Bold", 10)
+    pdf.drawString(left, y, "Group")
+    pdf.drawString(left + 260, y, "Count")
+    y -= 16
 
-    # Total students
-    c_pdf.setFont("Helvetica-Bold", 14)
-    c_pdf.drawString(50, height - 110, f"Total Students: {total_students}")
+    pdf.setFont("Helvetica", 9)
+    for row in counts:
+        if y < 50:
+            pdf.showPage()
+            y = height - 40
+            pdf.setFont("Helvetica", 9)
+        pdf.drawString(left, y, str(row["group"]))
+        pdf.drawString(left + 260, y, str(row["count"]))
+        y -= 14
 
-    # Group counts
-    c_pdf.setFont("Helvetica-Bold", 12)
-    c_pdf.drawString(50, height - 150, "Students by Group:")
+    pdf.save()
+    messagebox.showinfo("Export Complete", f"Student count report saved to:\n{filename}")
 
-    y_pos = height - 170
-    c_pdf.setFont("Helvetica", 12)
-    for group_name, count in group_counts:
-        c_pdf.drawString(70, y_pos, f"- {group_name}: {count}")
-        y_pos -= 20
 
-    if not group_counts:
-        c_pdf.drawString(70, y_pos, "No groups found.")
+# ---------------------------------------------------------------------------
+# Export: single student's payment history (academic year) to PDF
+# ---------------------------------------------------------------------------
 
-    c_pdf.showPage()
-    c_pdf.save()
+def _months_for_academic_year(start_year: int):
+    """
+    Same logic as in paymants_log: returns list of (year, month, label).
+    Academic year: Aug(start_year)..Dec(start_year), Jan(start_year+1)..Jul(start_year+1).
+    """
+    labels = ["Aug", "Sep", "Oct", "Nov", "Dec",
+              "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul"]
+    months = []
+    for idx, lab in enumerate(labels):
+        if idx < 5:
+            y = start_year
+            m = 8 + idx
+        else:
+            y = start_year + 1
+            m = idx - 4
+        months.append((y, m, lab))
+    return months
 
-    messagebox.showinfo("Export Complete", f"Student count report saved to:\n{pdf_path}")
+
+def export_student_payment_history_pdf():
+    """
+    Prompt for Student ID and academic start year (e.g. 2024 for 2024–2025),
+    then export Aug(start_year)..Jul(start_year+1) payments to a PDF.
+    """
+    root = _root()
+
+    sid_str = simpledialog.askstring(
+        "Student ID",
+        "Enter Student ID (number):",
+        parent=root,
+    )
+    if sid_str is None:
+        return
+    try:
+        student_id = int(sid_str)
+    except ValueError:
+        messagebox.showerror("Invalid ID", "Student ID must be a number.")
+        return
+
+    start_year_str = simpledialog.askstring(
+        "Academic Year Start",
+        "Enter academic year start (e.g. 2024 for 2024–2025):",
+        parent=root,
+    )
+    if start_year_str is None:
+        return
+    try:
+        start_year = int(start_year_str)
+    except ValueError:
+        messagebox.showerror("Invalid Year", "Please enter a valid year.")
+        return
+
+    try:
+        stu = get_student(student_id)
+        groups_list = get_student_groups(student_id)
+        payments = get_payments_for_student_academic_year(student_id, start_year)
+    except NotFoundError:
+        messagebox.showerror("Not Found", f"Student {student_id} not found.")
+        return
+    except DBError as e:
+        messagebox.showerror("DB Error", str(e))
+        return
+
+    pay_map = {(p.year, p.month): p for p in payments}
+    months_spec = _months_for_academic_year(start_year)
+    groups_str = ", ".join(groups_list)
+
+    os.makedirs("exports", exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join(
+        "exports",
+        f"student_{student_id}_payments_{start_year}_{start_year+1}_{timestamp}.pdf"
+    )
+
+    pdf = canvas.Canvas(filename, pagesize=A4)
+    width, height = A4
+    left = 40
+    y = height - 40
+
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(left, y, "El Najah School")
+    y -= 20
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(left, y, f"Student Payment History — {student_id}: {stu.name}")
+    y -= 16
+    pdf.setFont("Helvetica", 10)
+    pdf.drawString(left, y, f"Groups: {groups_str or 'None'}")
+    y -= 14
+    pdf.drawString(left, y, f"Academic Year: {start_year}-{start_year+1}")
+    y -= 20
+
+    pdf.setFont("Helvetica-Bold", 10)
+    pdf.drawString(left, y, "Month")
+    pdf.drawString(left + 120, y, "Status")
+    pdf.drawString(left + 260, y, "Payment Date")
+    y -= 16
+
+    pdf.setFont("Helvetica", 9)
+    for (py, pm, label) in months_spec:
+        if y < 50:
+            pdf.showPage()
+            y = height - 40
+            pdf.setFont("Helvetica", 9)
+
+        p = pay_map.get((py, pm))
+        if p:
+            status = "Paid" if p.paid == "paid" else "Unpaid"
+            date_str = p.payment_date
+        else:
+            status = ""
+            date_str = ""
+
+        month_str = f"{label} {py}-{pm:02d}"
+        pdf.drawString(left, y, month_str)
+        pdf.drawString(left + 120, y, status)
+        pdf.drawString(left + 260, y, date_str)
+        y -= 14
+
+    pdf.save()
+    messagebox.showinfo("Export Complete", f"Student payment history saved to:\n{filename}")
+
+
+# ---------------------------------------------------------------------------
+# Help menu
+# ---------------------------------------------------------------------------
+
+def contact_support():
+    """
+    Open default mail client to contact support.
+    """
+    to_address = "support@example.com"  # change to your real support email
+    subject = "El Najah School - Support"
+    body = "Hello,\n\nI need help with El Najah School Manager.\n\nThanks."
+    url = f"mailto:{to_address}?subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}"
+    webbrowser.open(url)
+
+
+def send_feedback():
+    """
+    Open default mail client to send feedback.
+    """
+    to_address = "feedback@example.com"  # change to your real feedback email
+    subject = "El Najah School - Feedback"
+    body = "Hello,\n\nHere is my feedback about El Najah School Manager:\n\n"
+    url = f"mailto:{to_address}?subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}"
+    webbrowser.open(url)
