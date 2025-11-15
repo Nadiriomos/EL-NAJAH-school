@@ -127,8 +127,19 @@ search_type_var = ctk.StringVar(value="name")
 search_label = ctk.CTkLabel(top_frame, text="Search:", font=("Arial", 14), text_color=TEXT)
 search_label.grid(row=0, column=6, padx=(4, 4), pady=4, sticky="e")
 
-search_entry = ctk.CTkEntry(top_frame, textvariable=search_var, width=200)
-search_entry.grid(row=0, column=7, padx=(0, 4), pady=4, sticky="w")
+search_entry = ctk.CTkEntry(top_frame, textvariable=search_var)
+search_entry.grid(row=0, column=7, padx=(0, 4), pady=4, sticky="ew")
+
+search_button = ctk.CTkButton(
+    top_frame,
+    text="Search",
+    command=lambda: on_search_pressed(),  # use same logic as Enter key
+    fg_color=PRIMARY,
+    hover_color=HOVER,
+    text_color="white",
+    width=80,
+)
+search_button.grid(row=0, column=9, padx=(0, 10), pady=4, sticky="w")
 
 search_radio_frame = ctk.CTkFrame(top_frame, fg_color="transparent")
 search_radio_frame.grid(row=0, column=8, padx=(0, 10), pady=4, sticky="w")
