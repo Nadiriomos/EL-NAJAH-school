@@ -286,7 +286,7 @@ def open_add_student():
     """
     top = ctk.CTkToplevel(ElNajahSchool)
     top.title("New Student")
-    top.geometry("520x640")
+    top.geometry("470x570")
 
     try:
         top.grab_set()
@@ -314,8 +314,8 @@ def open_add_student():
 
     # Payment status for current filter month
     pay_frame = ctk.CTkFrame(form, fg_color="transparent")
-    pay_frame.grid(row=4, column=0, sticky="w", pady=(4, 8))
-    ctk.CTkLabel(pay_frame, text="Payment for selected month:", anchor="w").grid(row=0, column=0, columnspan=2, sticky="w")
+    pay_frame.grid(row=4, column=0, sticky="n", pady=(4, 8))
+    ctk.CTkLabel(pay_frame, text="Payment for selected month:", anchor="n").grid(row=0, column=0, columnspan=2, sticky="n")
 
     pay_var = ctk.StringVar(value="paid")
     ctk.CTkRadioButton(pay_frame, text="Paid", variable=pay_var, value="paid").grid(row=1, column=0, padx=(0, 6))
@@ -346,7 +346,7 @@ def open_add_student():
 
     # Buttons
     btn_frame = ctk.CTkFrame(top, fg_color="transparent")
-    btn_frame.pack(fill="x", padx=16, pady=(0, 16))
+    btn_frame.pack(pady=(0, 16), anchor="center") 
 
     def handle_save():
         name = name_entry.get().strip()
@@ -382,8 +382,12 @@ def open_add_student():
         refresh_group_filter()
         refresh_treeview_all()
 
-    ctk.CTkButton(btn_frame, text="Save", command=handle_save, fg_color=PRIMARY, hover_color=HOVER).pack(side="left", padx=4)
-    ctk.CTkButton(btn_frame, text="Cancel", command=top.destroy).pack(side="left", padx=4)
+    save_btn = ctk.CTkButton(btn_frame, text="Save", command=handle_save,
+                            fg_color=PRIMARY, hover_color=HOVER)
+    save_btn.pack(side="left", padx=4)
+
+    cancel_btn = ctk.CTkButton(btn_frame, text="Cancel", command=top.destroy)
+    cancel_btn.pack(side="left", padx=4)
 
 
 def open_add_group():
