@@ -25,7 +25,7 @@ from DB import (
 )
 
 import menu_tools
-import paymants_log
+import payments_log
 
 
 # ---------------------------------------------------------------------------
@@ -717,11 +717,11 @@ ctk.CTkButton(
 def open_history():
     # paymants_log currently expects a global ElNajahSchool. We also pass DB helpers through globals.
     try:
-        paymants_log.open_full_window()
+        payments_log.open_full_window()
     except AttributeError:
         # in the future you may switch to paymants_log.open_history_window(ElNajahSchool)
         try:
-            paymants_log.open_history_window(ElNajahSchool)
+            payments_log.open_history_window(ElNajahSchool)
         except Exception as e:
             messagebox.showerror("History Error", str(e))
 
@@ -793,8 +793,8 @@ menu_tools.ElNajahSchool = ElNajahSchool
 menu_tools.refresh_treeview_all = refresh_treeview_all
 menu_tools.get_all_groups = get_all_groups
 
-paymants_log.ElNajahSchool = ElNajahSchool
-paymants_log.get_all_groups = get_all_groups
+payments_log.ElNajahSchool = ElNajahSchool
+payments_log.get_all_groups = get_all_groups
 
 # Bindings
 search_entry.bind("<Return>", on_search_pressed)
