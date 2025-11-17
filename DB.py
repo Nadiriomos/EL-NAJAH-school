@@ -429,63 +429,6 @@ def restore_student_snapshot(snapshot: dict) -> None:
         conn.close()
 
 
-def fetch_student_with_current_payment(student_id: int) -> dict:
-    """
-    Helper used by the main UI.
-
-    Returns a dict with:
-        {
-            "id": int,
-            "name": str,
-            "pay": 'paid' | 'unpaid' | None,
-            "groups": [group_name, ...],
-        }
-
-    where "pay" is for the CURRENT month and year.
-    """
-    conn = _get_conn(row_factory=True)
-    c = conn.cursor()
-    try:
-        # student
-        c.execute("SELECT id, name FROM students WHERE id = ?", (student_id,))
-        row = c.fetchone()
-        if row is None:
-            raise NotFoundError(f"Student {student_id} not found.")
-        sid, name = row["id"], row["name"]
-
-        # current payment
-        now = datetime.now()
-        cy, cm = now.year, now.month
-        c.execute(
-            """
-            SELECT paid
-            FROM payments
-            WHERE student_id = ? AND year = ? AND month = ?
-            LIMIT 1
-            """,
-            (student_id, cy, cm),
-        )
-        pr = c.fetchone()
-        pay = pr["paid"] if pr else None
-
-        # groups
-        c.execute(
-            """
-            SELECT g.name
-            FROM groups g
-            JOIN student_group sg ON g.id = sg.group_id
-            WHERE sg.student_id = ?
-            ORDER BY g.name
-            """,
-            (student_id,),
-        )
-        groups = [r["name"] for r in c.fetchall()]
-
-        return {"id": sid, "name": name, "pay": pay, "groups": groups}
-    finally:
-        conn.close()
-
-
 # ---------------------------------------------------------------------------
 # Group operations
 # ---------------------------------------------------------------------------
